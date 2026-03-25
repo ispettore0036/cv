@@ -3,21 +3,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Object Detection</title>
+    <title>Object Detection Pro</title>
     <style>
-        body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: monospace; }
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: sans-serif; }
         .container { position: relative; width: 100%; max-width: 640px; display: none; }
-        video { width: 100%; display: block; background: #333; } /* Rimosso transform */
-        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; } /* Rimosso transform */
+        video { width: 100%; display: block; background: #333; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         
-        #startBtn {
-            margin-top: 50px; padding: 15px 30px; font-size: 18px;
-            background: #00FF00; border: none; color: #000; font-weight: bold; cursor: pointer;
+        /* Pulsante Avvio */
+        #startBtn { margin-top: 50px; padding: 15px 30px; font-size: 18px; background: #00FF00; border: none; color: #000; font-weight: bold; cursor: pointer; }
+        
+        /* Pannello Impostazioni */
+        #settingsPanel {
+            position: fixed; top: 10px; right: 10px; width: 220px;
+            background: rgba(0, 0, 0, 0.8); border: 1px solid #444;
+            padding: 10px; color: #fff; border-radius: 8px; z-index: 2000;
+            display: none; /* Nascosto di default */
         }
+        #settingsToggle {
+            position: fixed; top: 10px; right: 10px; z-index: 2001;
+            background: #333; color: #fff; border: 1px solid #fff;
+            padding: 5px 10px; cursor: pointer; border-radius: 4px;
+        }
+        .control-group { margin-bottom: 10px; }
+        label { display: block; font-size: 12px; margin-bottom: 4px; }
+        input[type=range] { width: 100%; }
+        .val-display { float: right; color: #0f0; }
+
+        /* Log */
         #debug-log {
             position: fixed; bottom: 10px; left: 10px; width: 90%; max-width: 300px;
-            max-height: 150px; overflow-y: auto; background: rgba(0, 0, 0, 0.85);
-            color: #0f0; border: 1px solid #0f0; padding: 5px; font-size: 12px; z-index: 1000;
+            max-height: 100px; overflow-y: auto; background: rgba(0, 0, 0, 0.85);
+            color: #0f0; border: 1px solid #0f0; padding: 5px; font-size: 11px; z-index: 1000;
+            display: none;
         }
         .err { color: #f55; }
     </style>
@@ -33,7 +51,28 @@
         <canvas id="canvas"></canvas>
     </div>
 
-    <div id="debug-log">In attesa di avvio...</div>
+    <!-- Toggle Impostazioni -->
+    <div id="settingsToggle" onclick="toggleSettings()">⚙️ Impostazioni</div>
+
+    <!-- Pannello Impostazioni -->
+    <div id="settingsPanel">
+        <div class="control-group">
+            <label>Confidenza Min: <span id="scoreVal" class="val-display">50%</span></label>
+            <input type="range" id="scoreSlider" min="10" max="90" value="50">
+        </div>
+        <div class="control-group">
+            <label>Oggetti Max: <span id="maxVal" class="val-display">10</span></label>
+            <input type="range" id="maxSlider" min="1" max="50" value="10">
+        </div>
+        <div class="control-group">
+            <label><input type="checkbox" id="logCheck"> Mostra Log</label>
+        </div>
+        <div style="font-size:10px; color:#aaa; margin-top:5px;">
+            Nota: Abbassare la confidenza rileva più oggetti ma aumenta i falsi positivi.
+        </div>
+    </div>
+
+    <div id="debug-log">In attesa...</div>
 
     <script>
         const video = document.getElementById('video');
@@ -42,15 +81,35 @@
         const logBox = document.getElementById('debug-log');
         const startBtn = document.getElementById('startBtn');
         const container = document.getElementById('videoContainer');
+        const settingsPanel = document.getElementById('settingsPanel');
+        
+        // Controls
+        const scoreSlider = document.getElementById('scoreSlider');
+        const scoreVal = document.getElementById('scoreVal');
+        const maxSlider = document.getElementById('maxSlider');
+        const maxVal = document.getElementById('maxVal');
+        const logCheck = document.getElementById('logCheck');
+
         let model = null;
+        let isDetecting = false;
 
         function log(msg, type = 'info') {
+            if (!logCheck.checked) return;
             const line = document.createElement('div');
             line.textContent = `> ${msg}`;
             if (type === 'error') line.className = 'err';
             logBox.appendChild(line);
             logBox.scrollTop = logBox.scrollHeight;
         }
+
+        function toggleSettings() {
+            settingsPanel.style.display = settingsPanel.style.display === 'block' ? 'none' : 'block';
+        }
+
+        // Update UI values
+        scoreSlider.oninput = () => scoreVal.innerText = scoreSlider.value + '%';
+        maxSlider.oninput = () => maxVal.innerText = maxSlider.value;
+        logCheck.onchange = () => logBox.style.display = logCheck.checked ? 'block' : 'none';
 
         async function loadModel() {
             log("Caricamento modello...");
@@ -82,6 +141,7 @@
                     
                     video.play().then(() => {
                         log("Stream attivo.", "info");
+                        isDetecting = true;
                         detectFrame();
                     }).catch(e => log("ERRORE Play: " + e, "error"));
                 };
@@ -93,24 +153,38 @@
         }
 
         async function detectFrame() {
-            if (!model || video.paused || video.ended) {
+            if (!model || !isDetecting || video.paused || video.ended) {
                 requestAnimationFrame(detectFrame);
                 return;
             }
-            const predictions = await model.detect(video);
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            predictions.forEach(pred => {
-                const [x, y, w, h] = pred.bbox;
-                ctx.strokeStyle = '#00FF00';
-                ctx.lineWidth = 4;
-                ctx.strokeRect(x, y, w, h);
-                ctx.fillStyle = '#00FF00';
-                const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
-                ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
-                ctx.fillStyle = '#000000';
-                ctx.font = '16px Arial';
-                ctx.fillText(text, x + 5, y - 5);
-            });
+
+            // Leggi parametri dal pannello
+            const minScore = parseInt(scoreSlider.value) / 100;
+            const maxDetections = parseInt(maxSlider.value);
+
+            try {
+                // Configura detection dinamica
+                const predictions = await model.detect(video, { minScore: minScore, maxDetections: maxDetections });
+                
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                predictions.forEach(pred => {
+                    const [x, y, w, h] = pred.bbox;
+                    ctx.strokeStyle = '#00FF00';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(x, y, w, h);
+                    
+                    ctx.fillStyle = '#00FF00';
+                    const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
+                    ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
+                    
+                    ctx.fillStyle = '#000000';
+                    ctx.font = '14px Arial';
+                    ctx.fillText(text, x + 5, y - 5);
+                });
+            } catch (e) {
+                // Ignora errori singoli frame per non bloccare il loop
+            }
             requestAnimationFrame(detectFrame);
         }
 
