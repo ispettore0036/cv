@@ -3,34 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Object Detection Pro</title>
+    <title>Multi-Model Object Detection</title>
     <style>
         body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: sans-serif; }
         .container { position: relative; width: 100%; max-width: 640px; display: none; }
         video { width: 100%; display: block; background: #333; }
         canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         
-        /* Pulsante Avvio */
         #startBtn { margin-top: 50px; padding: 15px 30px; font-size: 18px; background: #00FF00; border: none; color: #000; font-weight: bold; cursor: pointer; }
         
-        /* Pannello Impostazioni */
         #settingsPanel {
-            position: fixed; top: 10px; right: 10px; width: 220px;
-            background: rgba(0, 0, 0, 0.8); border: 1px solid #444;
-            padding: 10px; color: #fff; border-radius: 8px; z-index: 2000;
-            display: none; /* Nascosto di default */
+            position: fixed; top: 10px; right: 10px; width: 250px;
+            background: rgba(0, 0, 0, 0.9); border: 1px solid #444;
+            padding: 15px; color: #fff; border-radius: 8px; z-index: 2000;
+            display: none;
         }
         #settingsToggle {
             position: fixed; top: 10px; right: 10px; z-index: 2001;
             background: #333; color: #fff; border: 1px solid #fff;
-            padding: 5px 10px; cursor: pointer; border-radius: 4px;
+            padding: 8px 12px; cursor: pointer; border-radius: 4px;
         }
-        .control-group { margin-bottom: 10px; }
+        .control-group { margin-bottom: 12px; }
         label { display: block; font-size: 12px; margin-bottom: 4px; }
         input[type=range] { width: 100%; }
+        select { width: 100%; padding: 5px; background: #222; color: #fff; border: 1px solid #444; }
         .val-display { float: right; color: #0f0; }
+        .model-info { font-size: 11px; color: #aaa; margin-top: 5px; }
 
-        /* Log */
         #debug-log {
             position: fixed; bottom: 10px; left: 10px; width: 90%; max-width: 300px;
             max-height: 100px; overflow-y: auto; background: rgba(0, 0, 0, 0.85);
@@ -38,9 +37,17 @@
             display: none;
         }
         .err { color: #f55; }
+        .warn { color: #ff0; }
     </style>
+    
+    <!-- TensorFlow.js -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+    
+    <!-- Handtrack.js -->
+    <script src="https://cdn.jsdelivr.net/npm/handtrackjs"></script>
 </head>
 <body>
 
@@ -51,24 +58,33 @@
         <canvas id="canvas"></canvas>
     </div>
 
-    <!-- Toggle Impostazioni -->
     <div id="settingsToggle" onclick="toggleSettings()">⚙️ Impostazioni</div>
 
-    <!-- Pannello Impostazioni -->
     <div id="settingsPanel">
+        <div class="control-group">
+            <label>Modello Attivo:</label>
+            <select id="modelSelect">
+                <option value="coco">COCO-SSD (80 oggetti)</option>
+                <option value="handtrack">Handtrack.js (Mani)</option>
+                <option value="handpose">HandPose (Mani dettagliate)</option>
+                <option value="blazepose">BlazePose (Corpo completo)</option>
+                <option value="all">Tutti i modelli</option>
+            </select>
+            <div class="model-info" id="modelDesc">Rileva 80 classi di oggetti comuni</div>
+        </div>
+        
         <div class="control-group">
             <label>Confidenza Min: <span id="scoreVal" class="val-display">50%</span></label>
             <input type="range" id="scoreSlider" min="10" max="90" value="50">
         </div>
+        
         <div class="control-group">
-            <label>Oggetti Max: <span id="maxVal" class="val-display">10</span></label>
-            <input type="range" id="maxSlider" min="1" max="50" value="10">
+            <label>Velocità: <span id="fpsVal" class="val-display">Normale</span></label>
+            <input type="range" id="fpsSlider" min="1" max="4" value="2" step="1">
         </div>
+        
         <div class="control-group">
             <label><input type="checkbox" id="logCheck"> Mostra Log</label>
-        </div>
-        <div style="font-size:10px; color:#aaa; margin-top:5px;">
-            Nota: Abbassare la confidenza rileva più oggetti ma aumenta i falsi positivi.
         </div>
     </div>
 
@@ -84,20 +100,39 @@
         const settingsPanel = document.getElementById('settingsPanel');
         
         // Controls
+        const modelSelect = document.getElementById('modelSelect');
+        const modelDesc = document.getElementById('modelDesc');
         const scoreSlider = document.getElementById('scoreSlider');
         const scoreVal = document.getElementById('scoreVal');
-        const maxSlider = document.getElementById('maxSlider');
-        const maxVal = document.getElementById('maxVal');
+        const fpsSlider = document.getElementById('fpsSlider');
+        const fpsVal = document.getElementById('fpsVal');
         const logCheck = document.getElementById('logCheck');
 
-        let model = null;
+        // Models
+        let cocoModel = null;
+        let handtrackModel = null;
+        let handposeModel = null;
+        let poseDetector = null;
+        
         let isDetecting = false;
+        let frameCount = 0;
+        const fpsRates = {1: 'Lenta', 2: 'Normale', 3: 'Veloce', 4: 'Massima'};
+
+        // Model descriptions
+        const descriptions = {
+            coco: 'Rileva 80 classi di oggetti comuni (persone, animali, veicoli...)',
+            handtrack: 'Rilevamento mani veloce e leggero',
+            handpose: 'Rilevamento dettagliato mani con landmark',
+            blazepose: 'Rilevamento corpo umano completo (33 keypoints)',
+            all: 'Usa tutti i modelli simultaneamente (più lento)'
+        };
 
         function log(msg, type = 'info') {
             if (!logCheck.checked) return;
             const line = document.createElement('div');
             line.textContent = `> ${msg}`;
             if (type === 'error') line.className = 'err';
+            if (type === 'warn') line.className = 'warn';
             logBox.appendChild(line);
             logBox.scrollTop = logBox.scrollHeight;
         }
@@ -106,19 +141,42 @@
             settingsPanel.style.display = settingsPanel.style.display === 'block' ? 'none' : 'block';
         }
 
-        // Update UI values
+        modelSelect.onchange = () => {
+            modelDesc.textContent = descriptions[modelSelect.value];
+            log(`Modello selezionato: ${modelSelect.options[modelSelect.selectedIndex].text}`);
+        };
         scoreSlider.oninput = () => scoreVal.innerText = scoreSlider.value + '%';
-        maxSlider.oninput = () => maxVal.innerText = maxSlider.value;
+        fpsSlider.oninput = () => fpsVal.innerText = fpsRates[fpsSlider.value];
         logCheck.onchange = () => logBox.style.display = logCheck.checked ? 'block' : 'none';
 
-        async function loadModel() {
-            log("Caricamento modello...");
+        async function loadModels() {
+            log("Caricamento modelli...");
             try {
-                model = await cocoSsd.load();
-                log("Modello pronto.", "info");
+                // COCO-SSD
+                log("Caricamento COCO-SSD...");
+                cocoModel = await cocoSsd.load();
+                log("COCO-SSD pronto", "info");
+                
+                // Handtrack.js
+                log("Caricamento Handtrack.js...");
+                handtrackModel = await handtrack.load({model: 'fast'}); // fast, medium, accurate
+                log("Handtrack.js pronto", "info");
+                
+                // HandPose
+                log("Caricamento HandPose...");
+                handposeModel = await handpose.load();
+                log("HandPose pronto", "info");
+                
+                // BlazePose
+                log("Caricamento BlazePose...");
+                const detectorConfig = {model: 'MoveNet', modelType: 'SINGLEPOSE_LIGHTNING'};
+                poseDetector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
+                log("BlazePose pronto", "info");
+                
+                log("Tutti i modelli caricati!", "info");
             } catch (error) {
-                log("ERRORE Modello: " + error.message, "error");
-                startBtn.innerText = "ERRORE MODELLO";
+                log("ERRORE caricamento modelli: " + error.message, "error");
+                startBtn.innerText = "ERRORE MODELLI";
             }
         }
 
@@ -140,7 +198,7 @@
                     canvas.height = video.videoHeight;
                     
                     video.play().then(() => {
-                        log("Stream attivo.", "info");
+                        log("Stream attivo", "info");
                         isDetecting = true;
                         detectFrame();
                     }).catch(e => log("ERRORE Play: " + e, "error"));
@@ -153,43 +211,140 @@
         }
 
         async function detectFrame() {
-            if (!model || !isDetecting || video.paused || video.ended) {
+            if (!isDetecting || video.paused || video.ended) {
                 requestAnimationFrame(detectFrame);
                 return;
             }
 
-            // Leggi parametri dal pannello
+            frameCount++;
+            const skipFrames = parseInt(fpsSlider.value);
+            
+            // Skip frames for performance
+            if (frameCount % skipFrames !== 0) {
+                requestAnimationFrame(detectFrame);
+                return;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
             const minScore = parseInt(scoreSlider.value) / 100;
-            const maxDetections = parseInt(maxSlider.value);
+            const selectedModel = modelSelect.value;
 
             try {
-                // Configura detection dinamica
-                const predictions = await model.detect(video, { minScore: minScore, maxDetections: maxDetections });
-                
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                
-                predictions.forEach(pred => {
-                    const [x, y, w, h] = pred.bbox;
-                    ctx.strokeStyle = '#00FF00';
-                    ctx.lineWidth = 3;
-                    ctx.strokeRect(x, y, w, h);
-                    
-                    ctx.fillStyle = '#00FF00';
-                    const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
-                    ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
-                    
-                    ctx.fillStyle = '#000000';
-                    ctx.font = '14px Arial';
-                    ctx.fillText(text, x + 5, y - 5);
-                });
+                if (selectedModel === 'coco' || selectedModel === 'all') {
+                    await detectCOCO(minScore);
+                }
+                if (selectedModel === 'handtrack' || selectedModel === 'all') {
+                    await detectHandtrack(minScore);
+                }
+                if (selectedModel === 'handpose' || selectedModel === 'all') {
+                    await detectHandPose(minScore);
+                }
+                if (selectedModel === 'blazepose' || selectedModel === 'all') {
+                    await detectBlazePose(minScore);
+                }
             } catch (e) {
-                // Ignora errori singoli frame per non bloccare il loop
+                log("ERRORE detection: " + e.message, "error");
             }
+            
             requestAnimationFrame(detectFrame);
         }
 
+        async function detectCOCO(minScore) {
+            const predictions = await cocoModel.detect(video, { minScore: minScore, maxDetections: 20 });
+            predictions.forEach(pred => {
+                drawBox(pred.bbox, `${pred.class} ${Math.round(pred.score*100)}%`, '#00FF00');
+            });
+        }
+
+        async function detectHandtrack(minScore) {
+            const predictions = await handtrackModel.detect(video);
+            if (predictions.length > 0 && predictions[0].score > minScore) {
+                const pred = predictions[0];
+                drawBox([pred.x, pred.y, pred.width, pred.height], `Mano ${Math.round(pred.score*100)}%`, '#FF00FF');
+            }
+        }
+
+        async function detectHandPose(minScore) {
+            const predictions = await handposeModel.estimateHands(video);
+            predictions.forEach(hand => {
+                if (hand.score > minScore) {
+                    const box = getBoundingBox(hand.landmarks);
+                    drawBox(box, `Mano ${Math.round(hand.score*100)}%`, '#00FFFF');
+                    // Draw landmarks
+                    ctx.fillStyle = '#00FFFF';
+                    hand.landmarks.forEach(point => {
+                        ctx.beginPath();
+                        ctx.arc(point[0], point[1], 3, 0, 2 * Math.PI);
+                        ctx.fill();
+                    });
+                }
+            });
+        }
+
+        async function detectBlazePose(minScore) {
+            const poses = await poseDetector.estimatePoses(video);
+            poses.forEach(pose => {
+                if (pose.score > minScore) {
+                    // Draw keypoints
+                    pose.keypoints.forEach(keypoint => {
+                        if (keypoint.score > minScore) {
+                            ctx.fillStyle = '#FFFF00';
+                            ctx.beginPath();
+                            ctx.arc(keypoint.x, keypoint.y, 4, 0, 2 * Math.PI);
+                            ctx.fill();
+                        }
+                    });
+                    
+                    // Draw skeleton
+                    const connections = poseDetector.util.getAdjacentPairs(poseDetection.SupportedModels.MoveNet);
+                    ctx.strokeStyle = '#FFFF00';
+                    ctx.lineWidth = 2;
+                    connections.forEach(([i, j]) => {
+                        const kp1 = pose.keypoints[i];
+                        const kp2 = pose.keypoints[j];
+                        if (kp1.score > minScore && kp2.score > minScore) {
+                            ctx.beginPath();
+                            ctx.moveTo(kp1.x, kp1.y);
+                            ctx.lineTo(kp2.x, kp2.y);
+                            ctx.stroke();
+                        }
+                    });
+                    
+                    const box = getBoundingBox(pose.keypoints.filter(k => k.score > minScore));
+                    drawBox(box, `Persona ${Math.round(pose.score*100)}%`, '#FFFF00');
+                }
+            });
+        }
+
+        function drawBox(bbox, label, color) {
+            const [x, y, w, h] = bbox;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, w, h);
+            
+            ctx.fillStyle = color;
+            const textWidth = ctx.measureText(label).width;
+            ctx.fillRect(x, y - 20, textWidth + 10, 20);
+            
+            ctx.fillStyle = '#000000';
+            ctx.font = '14px Arial';
+            ctx.fillText(label, x + 5, y - 5);
+        }
+
+        function getBoundingBox(points) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            points.forEach(p => {
+                const [x, y] = Array.isArray(p) ? p : [p.x, p.y];
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                maxX = Math.max(maxX, x);
+                maxY = Math.max(maxY, y);
+            });
+            return [minX, minY, maxX - minX, maxY - minY];
+        }
+
         startBtn.addEventListener('click', startCamera);
-        loadModel();
+        loadModels();
     </script>
 </body>
-</html>
+    </html>
