@@ -3,135 +3,129 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Debug Object Detection</title>
+    <title>Object Detection</title>
     <style>
         body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: monospace; }
-        .container { position: relative; width: 100%; max-width: 640px; }
+        .container { position: relative; width: 100%; max-width: 640px; display: none; } /* Nascosto all'inizio */
         video { width: 100%; display: block; transform: scaleX(-1); background: #333; }
         canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
         
-        /* Log Overlay */
+        #startBtn {
+            margin-top: 50px;
+            padding: 15px 30px;
+            font-size: 18px;
+            background: #00FF00;
+            border: none;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            z-index: 100;
+        }
         #debug-log {
-            position: fixed;
-            bottom: 10px;
-            left: 10px;
-            width: 90%;
-            max-width: 300px;
-            max-height: 150px;
-            overflow-y: auto;
-            background: rgba(0, 0, 0, 0.85);
-            color: #0f0;
-            border: 1px solid #0f0;
-            padding: 5px;
-            font-size: 12px;
-            z-index: 1000;
-            pointer-events: none; /* Clicca attraverso il log */
+            position: fixed; bottom: 10px; left: 10px; width: 90%; max-width: 300px;
+            max-height: 150px; overflow-y: auto; background: rgba(0, 0, 0, 0.85);
+            color: #0f0; border: 1px solid #0f0; padding: 5px; font-size: 12px; z-index: 1000;
         }
         .err { color: #f55; }
-        .warn { color: #ff0; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
 </head>
 <body>
 
-    <div class="container">
+    <button id="startBtn">AVVIA CAMERA</button>
+
+    <div class="container" id="videoContainer">
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
     </div>
 
-    <div id="debug-log">Inizio script...</div>
+    <div id="debug-log">In attesa di avvio...</div>
 
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const logBox = document.getElementById('debug-log');
+        const startBtn = document.getElementById('startBtn');
+        const container = document.getElementById('videoContainer');
         let model = null;
 
-        // Funzione Log
         function log(msg, type = 'info') {
-            const time = new Date().toLocaleTimeString();
             const line = document.createElement('div');
-            line.textContent = `[${time}] ${msg}`;
+            line.textContent = `> ${msg}`;
             if (type === 'error') line.className = 'err';
-            if (type === 'warn') line.className = 'warn';
             logBox.appendChild(line);
             logBox.scrollTop = logBox.scrollHeight;
-            console.log(msg);
         }
 
-        // 1. Caricamento Modello
         async function loadModel() {
-            log("Richiesta caricamento modello COCO-SSD...");
+            log("Caricamento modello...");
             try {
                 model = await cocoSsd.load();
-                log("Modello caricato con successo.", "info");
-                startCamera();
+                log("Modello pronto.", "info");
+                startBtn.disabled = false;
+                startBtn.innerText = "AVVIA CAMERA";
             } catch (error) {
                 log("ERRORE Modello: " + error.message, "error");
+                startBtn.innerText = "ERRORE MODELLO";
             }
         }
 
-        // 2. Accesso Fotocamera
         async function startCamera() {
-            log("Richiesta accesso fotocamera...");
+            startBtn.disabled = true;
+            startBtn.innerText = "Avvio...";
+            log("Richiesta camera...");
+            
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } } 
                 });
-                log("Stream fotocamera ottenuto.", "info");
                 video.srcObject = stream;
                 
                 video.onloadedmetadata = () => {
-                    log(`Video caricato: ${video.videoWidth}x${video.videoHeight}`, "info");
+                    container.style.display = 'block'; // Mostra video
+                    startBtn.style.display = 'none';   // Nascondi bottone
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     
-                    // Tentativo play esplicito
+                    // Play esplicito dopo gesto utente
                     video.play().then(() => {
-                        log("Video in riproduzione.", "info");
+                        log("Stream attivo.", "info");
                         detectFrame();
-                    }).catch(e => log("ERRORE Play Video: " + e, "error"));
+                    }).catch(e => log("ERRORE Play: " + e, "error"));
                 };
             } catch (err) {
                 log("ERRORE Camera: " + err.message, "error");
-                log("Verifica HTTPS e Permessi!", "warn");
+                startBtn.disabled = false;
+                startBtn.innerText = "RIPROVA";
             }
         }
 
-        // 3. Rilevamento
         async function detectFrame() {
             if (!model || video.paused || video.ended) {
                 requestAnimationFrame(detectFrame);
                 return;
             }
-            
-            try {
-                const predictions = await model.detect(video);
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                
-                predictions.forEach(pred => {
-                    const [x, y, width, height] = pred.bbox;
-                    ctx.strokeStyle = '#00FF00';
-                    ctx.lineWidth = 4;
-                    ctx.strokeRect(x, y, width, height);
-                    
-                    ctx.fillStyle = '#00FF00';
-                    const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
-                    ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
-                    
-                    ctx.fillStyle = '#000000';
-                    ctx.font = '16px Arial';
-                    ctx.fillText(text, x + 5, y - 5);
-                });
-            } catch (e) {
-                log("ERRORE Detection: " + e, "error");
-            }
+            const predictions = await model.detect(video);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            predictions.forEach(pred => {
+                const [x, y, w, h] = pred.bbox;
+                ctx.strokeStyle = '#00FF00';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(x, y, w, h);
+                ctx.fillStyle = '#00FF00';
+                const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
+                ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
+                ctx.fillStyle = '#000000';
+                ctx.font = '16px Arial';
+                ctx.fillText(text, x + 5, y - 5);
+            });
             requestAnimationFrame(detectFrame);
         }
 
-        // Avvio
+        // Init
+        startBtn.addEventListener('click', startCamera);
         loadModel();
     </script>
 </body>
