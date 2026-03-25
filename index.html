@@ -3,101 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rilevamento Oggetti Smartphone</title>
+    <title>Debug Object Detection</title>
     <style>
-        body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: sans-serif; }
-        h2 { color: #fff; margin: 10px 0; font-size: 16px; }
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; background: #000; font-family: monospace; }
         .container { position: relative; width: 100%; max-width: 640px; }
-        video { width: 100%; display: block; transform: scaleX(-1); } /* Effetto specchio */
+        video { width: 100%; display: block; transform: scaleX(-1); background: #333; }
         canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
-        #status { color: #0f0; margin: 10px; font-weight: bold; }
-        #loading { color: #ff0; }
+        
+        /* Log Overlay */
+        #debug-log {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            width: 90%;
+            max-width: 300px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.85);
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 5px;
+            font-size: 12px;
+            z-index: 1000;
+            pointer-events: none; /* Clicca attraverso il log */
+        }
+        .err { color: #f55; }
+        .warn { color: #ff0; }
     </style>
-    <!-- Caricamento TensorFlow.js e Coco-SSD -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
 </head>
 <body>
 
-    <h2>Object Detection Mobile</h2>
-    <div id="status">Caricamento modello...</div>
-    
     <div class="container">
-        <video id="video" autoplay playsinline></video>
+        <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
     </div>
+
+    <div id="debug-log">Inizio script...</div>
 
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const status = document.getElementById('status');
+        const logBox = document.getElementById('debug-log');
         let model = null;
+
+        // Funzione Log
+        function log(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.textContent = `[${time}] ${msg}`;
+            if (type === 'error') line.className = 'err';
+            if (type === 'warn') line.className = 'warn';
+            logBox.appendChild(line);
+            logBox.scrollTop = logBox.scrollHeight;
+            console.log(msg);
+        }
 
         // 1. Caricamento Modello
         async function loadModel() {
+            log("Richiesta caricamento modello COCO-SSD...");
             try {
                 model = await cocoSsd.load();
-                status.innerText = "Modello pronto. Avvio camera...";
-                status.style.color = "#0f0";
+                log("Modello caricato con successo.", "info");
                 startCamera();
             } catch (error) {
-                status.innerText = "Errore caricamento modello: " + error.message;
-                status.style.color = "#f00";
+                log("ERRORE Modello: " + error.message, "error");
             }
         }
 
         // 2. Accesso Fotocamera
         async function startCamera() {
+            log("Richiesta accesso fotocamera...");
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment' } // Usa camera posteriore
+                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } } 
                 });
+                log("Stream fotocamera ottenuto.", "info");
                 video.srcObject = stream;
+                
                 video.onloadedmetadata = () => {
+                    log(`Video caricato: ${video.videoWidth}x${video.videoHeight}`, "info");
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    status.innerText = "Rilevamento in corso...";
-                    detectFrame();
+                    
+                    // Tentativo play esplicito
+                    video.play().then(() => {
+                        log("Video in riproduzione.", "info");
+                        detectFrame();
+                    }).catch(e => log("ERRORE Play Video: " + e, "error"));
                 };
             } catch (err) {
-                status.innerText = "Errore camera: " + err.message + " (Richiede HTTPS)";
-                status.style.color = "#f00";
+                log("ERRORE Camera: " + err.message, "error");
+                log("Verifica HTTPS e Permessi!", "warn");
             }
         }
 
-        // 3. Rilevamento e Disegno
+        // 3. Rilevamento
         async function detectFrame() {
-            if (!model) return;
+            if (!model || video.paused || video.ended) {
+                requestAnimationFrame(detectFrame);
+                return;
+            }
             
-            // Esegui predizione
-            const predictions = await model.detect(video);
-            
-            // Pulisci canvas
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // Disegna risultati
-            predictions.forEach(pred => {
-                const [x, y, width, height] = pred.bbox;
+            try {
+                const predictions = await model.detect(video);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
-                // Riquadro
-                ctx.strokeStyle = '#00FF00';
-                ctx.lineWidth = 4;
-                ctx.strokeRect(x, y, width, height);
-                
-                // Sfondo etichetta
-                ctx.fillStyle = '#00FF00';
-                const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
-                const textWidth = ctx.measureText(text).width;
-                ctx.fillRect(x, y - 20, textWidth + 10, 20);
-                
-                // Testo
-                ctx.fillStyle = '#000000';
-                ctx.font = '16px Arial';
-                ctx.fillText(text, x + 5, y - 5);
-            });
-
-            // Loop
+                predictions.forEach(pred => {
+                    const [x, y, width, height] = pred.bbox;
+                    ctx.strokeStyle = '#00FF00';
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(x, y, width, height);
+                    
+                    ctx.fillStyle = '#00FF00';
+                    const text = `${pred.class} (${Math.round(pred.score * 100)}%)`;
+                    ctx.fillRect(x, y - 20, ctx.measureText(text).width + 10, 20);
+                    
+                    ctx.fillStyle = '#000000';
+                    ctx.font = '16px Arial';
+                    ctx.fillText(text, x + 5, y - 5);
+                });
+            } catch (e) {
+                log("ERRORE Detection: " + e, "error");
+            }
             requestAnimationFrame(detectFrame);
         }
 
